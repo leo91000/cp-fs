@@ -1,10 +1,12 @@
+use arboard::Clipboard;
 use clap::Parser;
-use clipboard::{ClipboardContext, ClipboardProvider};
 use content_inspector::{inspect, ContentType};
 use ignore::Walk;
 use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
+use std::thread::sleep;
+use std::time::Duration;
 
 const IGNORED_FILES: &[&str] = &[
     "yarn.lock",
@@ -29,7 +31,6 @@ const IGNORED_FILES: &[&str] = &[
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Path to the directory to process
-    #[arg(short, long)]
     path: PathBuf,
 }
 
@@ -65,6 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut output = String::new();
 
     let ignored_files = HashSet::from_iter(IGNORED_FILES.iter().copied());
+    let mut files = HashSet::new();
 
     // Walk through directory respecting gitignore
     for entry in Walk::new(&args.path) {
@@ -120,14 +122,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         output.push_str("---\n\n");
         output.push_str(&content_str);
         output.push_str("\n\n");
+        files.insert(relative_path);
     }
 
     // Copy to clipboard
-    let mut ctx: ClipboardContext = ClipboardProvider::new()?;
-    ctx.set_contents(output.clone())?;
+    let mut clipboard = Clipboard::new()?;
+    clipboard.set_text(&output)?;
+    sleep(Duration::from_millis(100));
 
     println!("File structure and contents copied to clipboard:");
-    println!("{}", output);
+    for file in files {
+        println!("- {}", file);
+    }
 
     Ok(())
 }
