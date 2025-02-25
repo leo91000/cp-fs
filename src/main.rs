@@ -1,8 +1,9 @@
 use arboard::Clipboard;
 use clap::Parser;
 use content_inspector::{inspect, ContentType};
+use glob::Pattern;
 use ignore::Walk;
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::thread::sleep;
@@ -32,6 +33,10 @@ const IGNORED_FILES: &[&str] = &[
 struct Args {
     /// Path to the directory to process
     path: PathBuf,
+
+    /// Additional files or directories to ignore (supports glob patterns)
+    #[arg(short = 'i', long = "ignore", value_delimiter = ',')]
+    ignore: Vec<String>,
 }
 
 fn is_text_file(content: &[u8]) -> bool {
@@ -41,18 +46,87 @@ fn is_text_file(content: &[u8]) -> bool {
     )
 }
 
-fn should_ignore_file(path: &std::path::Path, ignored_files: &HashSet<&str>) -> bool {
-    // Check if the file name matches any ignored file
+struct IgnorePatterns {
+    exact_matches: HashSet<String>,
+    glob_patterns: Vec<Pattern>,
+}
+
+impl IgnorePatterns {
+    fn new() -> Self {
+        Self {
+            exact_matches: HashSet::new(),
+            glob_patterns: Vec::new(),
+        }
+    }
+
+    fn add_pattern(&mut self, pattern: &str) {
+        // If the pattern contains glob characters, compile it as a glob pattern
+        if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
+            match Pattern::new(pattern) {
+                Ok(glob_pattern) => self.glob_patterns.push(glob_pattern),
+                Err(e) => eprintln!("Invalid glob pattern '{}': {}", pattern, e),
+            }
+        } else {
+            // Otherwise, treat it as an exact match
+            self.exact_matches.insert(pattern.to_string());
+        }
+    }
+
+    fn should_ignore(&self, path_str: &str) -> bool {
+        // Check for exact matches
+        if self.exact_matches.contains(path_str) {
+            return true;
+        }
+
+        // Check against glob patterns
+        for pattern in &self.glob_patterns {
+            if pattern.matches(path_str) {
+                return true;
+            }
+        }
+
+        false
+    }
+}
+
+fn should_ignore_file(
+    path: &std::path::Path,
+    base_path: &std::path::Path,
+    ignore_patterns: &IgnorePatterns,
+) -> bool {
+    // Check if the file name matches any ignored pattern
     if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-        if ignored_files.contains(file_name) {
+        if ignore_patterns.should_ignore(file_name) {
             return true;
         }
     }
 
-    // Check if any parent directory matches ignored files
+    // Check if any parent directory matches ignored patterns
     for ancestor in path.ancestors() {
+        if ancestor == base_path {
+            break;
+        }
         if let Some(dir_name) = ancestor.file_name().and_then(|n| n.to_str()) {
-            if ignored_files.contains(dir_name) {
+            if ignore_patterns.should_ignore(dir_name) {
+                return true;
+            }
+        }
+    }
+
+    // Check if the relative path matches any ignored pattern
+    if let Ok(relative_path) = path.strip_prefix(base_path) {
+        let relative_path_str = relative_path.to_string_lossy();
+        if ignore_patterns.should_ignore(&relative_path_str) {
+            return true;
+        }
+
+        // Also check path components for glob matches
+        let mut current = PathBuf::new();
+        let components: VecDeque<_> = relative_path.components().collect();
+        for component in components {
+            current.push(component);
+            let current_str = current.to_string_lossy();
+            if ignore_patterns.should_ignore(&current_str) {
                 return true;
             }
         }
@@ -65,7 +139,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
     let mut output = String::new();
 
-    let ignored_files = HashSet::from_iter(IGNORED_FILES.iter().copied());
+    // Set up ignore patterns
+    let mut ignore_patterns = IgnorePatterns::new();
+
+    // Add default ignored files
+    for &file in IGNORED_FILES {
+        ignore_patterns.add_pattern(file);
+    }
+
+    // Add user-provided ignored files
+    for pattern in &args.ignore {
+        ignore_patterns.add_pattern(pattern);
+    }
+
     let mut files = HashSet::new();
 
     // Walk through directory respecting gitignore
@@ -83,7 +169,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        if should_ignore_file(entry.path(), &ignored_files) {
+        if should_ignore_file(entry.path(), &args.path, &ignore_patterns) {
             continue;
         }
 
