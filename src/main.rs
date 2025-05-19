@@ -5,9 +5,9 @@ use glob::Pattern;
 use ignore::Walk;
 use std::collections::{HashSet, VecDeque};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
-use std::thread::sleep;
-use std::time::Duration;
+use std::process::{Command, Stdio};
 
 const IGNORED_FILES: &[&str] = &[
     "yarn.lock",
@@ -212,9 +212,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Copy to clipboard
-    let mut clipboard = Clipboard::new()?;
-    clipboard.set_text(&output)?;
-    sleep(Duration::from_millis(100));
+    #[cfg(target_os = "linux")]
+    {
+        if std::env::var("WAYLAND_DISPLAY").is_ok() {
+            // Use wl-copy for Wayland
+            let wl_copy = Command::new("wl-copy")
+                .stdin(Stdio::piped())
+                .spawn();
+            
+            match wl_copy {
+                Ok(mut process) => {
+                    if let Some(stdin) = process.stdin.take() {
+                        let mut stdin = stdin;
+                        let write_result = stdin.write_all(output.as_bytes());
+                        drop(stdin); // Close stdin to signal EOF
+                        
+                        if write_result.is_ok() && process.wait().map(|s| s.success()).unwrap_or(false) {
+                            // wl-copy succeeded
+                        } else {
+                            // Fallback to arboard
+                            let mut clipboard = Clipboard::new()?;
+                            clipboard.set_text(&output)?;
+                        }
+                    }
+                },
+                Err(_) => {
+                    // Fallback to arboard
+                    let mut clipboard = Clipboard::new()?;
+                    clipboard.set_text(&output)?;
+                }
+            }
+        } else {
+            // Use xclip for X11
+            let xclip = Command::new("xclip")
+                .arg("-selection")
+                .arg("clipboard")
+                .stdin(Stdio::piped())
+                .spawn();
+            
+            match xclip {
+                Ok(mut process) => {
+                    if let Some(stdin) = process.stdin.take() {
+                        let mut stdin = stdin;
+                        let write_result = stdin.write_all(output.as_bytes());
+                        drop(stdin); // Close stdin to signal EOF
+                        
+                        if write_result.is_ok() && process.wait().map(|s| s.success()).unwrap_or(false) {
+                            // xclip succeeded
+                        } else {
+                            // Fallback to arboard
+                            let mut clipboard = Clipboard::new()?;
+                            clipboard.set_text(&output)?;
+                        }
+                    }
+                },
+                Err(_) => {
+                    // Fallback to arboard
+                    let mut clipboard = Clipboard::new()?;
+                    clipboard.set_text(&output)?;
+                }
+            }
+        }
+    }
+    
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut clipboard = Clipboard::new()?;
+        clipboard.set_text(&output)?;
+    }
 
     println!("File structure and contents copied to clipboard:");
     for file in files {
